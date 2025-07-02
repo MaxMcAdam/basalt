@@ -1,0 +1,8 @@
+[package]
+name = "basalt-persistence"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossbeam-skiplist = "0.1.3"
+thiserror = "2.0.12"
