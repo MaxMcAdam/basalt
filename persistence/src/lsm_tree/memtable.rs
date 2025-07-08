@@ -15,7 +15,7 @@ pub struct Memtable {
     frozen: AtomicBool
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, bincode::Encode, bincode::Decode)]
 pub struct Entry {
     value: Vec<u8>,
     sequence: u64,
@@ -23,7 +23,7 @@ pub struct Entry {
     timestamp: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, bincode::Encode, bincode::Decode)]
 pub enum EntryType {
     PUT,
     DELETE,
@@ -37,6 +37,8 @@ pub enum MemtableError {
     EmptyKey,
     #[error("Value too large: {size} bytes")]
     ValueTooLarge { size: usize },
+    #[error("SystemTime error")]
+    SystemTimeError,
 }
 
 impl Memtable {
@@ -65,12 +67,12 @@ impl Memtable {
             return Err(MemtableError::Frozen);
         }
 
-        let seq_num = self.sequence_counter.fetch_add(1, Ordering::SeqCst);
+        let seq_num = self.sequence_counter.fetch_add(1, Ordering::AcqRel);
 
         let timestamp = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs();
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| MemtableError::SystemTimeError)?
+            .as_secs();
 
         let size = Self::ENTRY_OVERHEAD + value.len() + key.len();
 
@@ -80,7 +82,7 @@ impl Memtable {
                         timestamp: timestamp
                         };
 
-        self.size_bytes.fetch_add(size as u64, Ordering::SeqCst);
+        self.size_bytes.fetch_add(size as u64, Ordering::Relaxed);
         self.data.insert(key, entry);
 
         return Ok(());
@@ -95,18 +97,24 @@ impl Memtable {
         }
 
         let timestamp = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs();
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| MemtableError::SystemTimeError)?
+            .as_secs();
                     
-        let seq_num = self.sequence_counter.fetch_add(1, Ordering::SeqCst);
+        let seq_num = self.sequence_counter.fetch_add(1, Ordering::AcqRel);
 
         let entry = Entry{value: Vec::new(),
                                 sequence: seq_num,
                                 entry_type: EntryType::DELETE,
                                 timestamp: timestamp};
 
-        let val_size = self.data.get(&key).map(|entry_ref| entry.value.len()).unwrap_or_default();
+        let val_size = self.data.get(&key).map(|entry_ref| entry_ref.value().value.len()).unwrap_or_default();
+        if val_size == 0 {
+            // this entry is new. add the key size and overhead to the table size
+            self.size_bytes.fetch_add((Self::ENTRY_OVERHEAD + key.len()) as u64, Ordering::Relaxed);
+        }
+         
+        // remove the size of the existing value from the table size
         self.size_bytes.fetch_sub(val_size as u64, Ordering::Relaxed);
         self.data.insert(key, entry);
         return Ok(())
@@ -126,11 +134,11 @@ impl Memtable {
     }
     pub fn freeze(&self) -> bool {
         self.frozen
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
     }
     pub fn is_frozen(&self) -> bool {
-        return self.frozen.load(Ordering::Relaxed)
+        return self.frozen.load(Ordering::Acquire)
     }
     pub fn iter_all(&self) -> impl Iterator<Item = (Key, Entry)> + '_ {
         return self.data
