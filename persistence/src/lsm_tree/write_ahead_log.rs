@@ -19,7 +19,7 @@ pub struct WAL {
     current_writer: Option<BufWriter<File>>,
 }
 
-#[derive(Debug, thiserror::Error, bincode::Encode,  bincode::Decode)]
+#[derive(Debug, thiserror::Error, bincode::Encode,  bincode::Decode, Clone)]
 pub struct WALEntry {
     key: Key,
     entry: Entry,
@@ -32,10 +32,9 @@ impl std::fmt::Display for WALEntry {
 }
 
 impl WALEntry {
-    pub fn deserialize(entry_bytes:  &Vec<u8>) -> Result<&Self, WALError> {
-        let entry =  bincode::decode_from_slice(&entry_bytes, bincode::config::standard())?;
-
-        Ok(entry);
+    pub fn deserialize(entry_bytes: &[u8]) -> Result<Self, WALError> {
+        let (entry, _) = bincode::decode_from_slice(entry_bytes, bincode::config::standard())?;
+        Ok(entry)
     }
 }
 
@@ -173,10 +172,10 @@ impl WAL {
             }
 
             buffer.resize(entry_len as usize, 0);
-            file.read_exact(&buffer);
+            file.read_exact(&mut buffer)?;
 
             match WALEntry::deserialize(&buffer) {
-                Ok(entry) => entries.push(*entry),
+                Ok(entry) => entries.push(entry.clone()),
                 Err(e) => return Err(e),
             }
         }
